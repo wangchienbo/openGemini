@@ -860,21 +860,31 @@ func (e *Engine) WriteToRaft(db, rp string, ptId uint32, tail []byte) error {
 		return err
 	}
 	defer dbpt.node.RemoveCommittedDataC(wrapper)
+	go func(marshal []byte, c chan error) {
+		defer func() {
+			if e := recover(); e != nil {
+				logger.GetLogger().Error("runtime panic", zap.String("writeToRaft raise stack:", string(debug.Stack())),
+					zap.Error(errno.NewError(errno.RecoverPanic, e)),
+					zap.String("db", db),
+					zap.Uint32("ptId", ptId))
+			}
+		}()
 
-	// 3.propose
-	dbpt.proposeC <- marshal
-
-	// 4.wait committed return
-	timeT := time.After(10 * time.Second)
-	select {
-	case commitedErr := <-c:
-		if commitedErr != nil {
-			logger.GetLogger().Error("raftNode commitedErr err", zap.Error(commitedErr))
+		// 3.propose
+		dbpt.proposeC <- marshal
+		// 4.wait committed return
+		timeT := time.After(10 * time.Second)
+		select {
+		case commitedErr := <-c:
+			if commitedErr != nil {
+				logger.GetLogger().Error("raftNode commitedErr err", zap.Error(commitedErr))
+			}
+			panic(commitedErr)
+		case <-timeT:
+			panic(errno.NewError(errno.WriteToRaftTimeoutAfterPropose, wrapper.Identity, wrapper.ProposeId))
 		}
-		return commitedErr
-	case <-timeT:
-		return errno.NewError(errno.WriteToRaftTimeoutAfterPropose, wrapper.Identity, wrapper.ProposeId)
-	}
+	}(marshal, c)
+	return nil
 }
 
 func (e *Engine) WriteRows(db, rp string, ptId uint32, shardID uint64, rows []influx.Row, binaryRows []byte, snp *raftlog.SnapShotter) error {
