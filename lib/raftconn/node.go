@@ -62,6 +62,8 @@ type RaftNode struct {
 	commitC     chan *Commit           // entries committed to log (influx.Rows)
 	ReplayC     chan *Commit           // entries committed to log (influx.Rows)
 	errorC      chan<- error           // errors from raft session
+	Messages    chan raftpb.Message    // raft messages
+	MessagesWg  sync.WaitGroup
 
 	nodeId   uint64 // real data node id
 	database string
@@ -149,6 +151,8 @@ func StartNode(store *raftlog.RaftDiskStorage, nodeId uint64, database string, i
 		MetaClient:     client,
 		ISend:          netstorage.NewNetStorage(client),
 		DataCommittedC: make(map[uint64]chan error),
+		Messages:        make(chan raftpb.Message),
+		MessagesWg:      sync.WaitGroup{},
 	}
 	n.initIdentity()
 	return n
@@ -245,6 +249,7 @@ func (n *RaftNode) InitAndStartNode() error {
 	go n.serveChannels()
 	go n.snapshotAfterFlush()
 	go n.deleteEntryLogPeriodically()
+	go n.sendRaftMessages()
 	return nil
 }
 
@@ -303,8 +308,10 @@ func (n *RaftNode) serveChannels() {
 			if leader {
 				// Leader can send messages in parallel with writing to disk.
 				for i := range n.processMessages(rd.Messages) {
-					n.send(rd.Messages[i])
+					n.MessagesWg.Add(1)
+					n.Messages <- rd.Messages[i]
 				}
+				n.MessagesWg.Wait()
 				n.logger.Debug("leader send message successful", zap.Duration("time used", time.Since(start)))
 				start = time.Now()
 			}
@@ -712,6 +719,22 @@ func (n *RaftNode) deleteEntryLogPeriodically() {
 		case <-n.ctx.Done():
 			logger.GetLogger().Error("ctx done...")
 		}
+	}
+}
+
+func (n *RaftNode) sendRaftMessages(){
+	for i := 0; i < 16; i++ {
+		go func ()  {
+			for {
+				select {
+				case msg := <-n.Messages:
+					n.send(msg)
+					n.MessagesWg.Done()
+				case <-n.ctx.Done():
+					return
+				}
+			}
+		}()
 	}
 }
 
