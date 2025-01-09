@@ -27,6 +27,7 @@ import (
 	jsoniter "github.com/json-iterator/go"
 	"github.com/openGemini/openGemini/app"
 	"github.com/openGemini/openGemini/engine/hybridqp"
+	compression "github.com/openGemini/openGemini/lib/compress"
 	config2 "github.com/openGemini/openGemini/lib/config"
 	"github.com/openGemini/openGemini/lib/cpu"
 	"github.com/openGemini/openGemini/lib/errno"
@@ -103,12 +104,12 @@ const (
 
 // Route specifies how to handle a HTTP verb for a given endpoint.
 type Route struct {
-	Name           string
-	Method         string
-	Pattern        string
-	Gzipped        bool
-	LoggingEnabled bool
-	HandlerFunc    interface{}
+	Name              string
+	Method            string
+	Pattern           string
+	CompressSupported bool
+	LoggingEnabled    bool
+	HandlerFunc       interface{}
 }
 
 type SubscriberManager interface {
@@ -571,8 +572,8 @@ func (h *Handler) AddRoutes(routes ...Route) {
 		}
 
 		handler = h.responseWriter(handler)
-		if r.Gzipped {
-			handler = gzipFilter(handler)
+		if r.CompressSupported {
+			handler = compressFilter(handler)
 		}
 		handler = cors(handler)
 		handler = requestID(handler)
@@ -1058,6 +1059,9 @@ func (h *Handler) serveQuery(w http.ResponseWriter, r *http.Request, user meta2.
 	}
 
 	epoch := strings.TrimSpace(r.FormValue("epoch"))
+	if epoch == "" {
+		epoch = "rfc3339"
+	}
 
 	db := r.FormValue("db")
 	var qDuration *statistics.SQLSlowQueryStatistics
@@ -1318,7 +1322,7 @@ func (h *Handler) serveWrite(w http.ResponseWriter, r *http.Request, user meta2.
 
 	// Handle gzip decoding of the body
 	if r.Header.Get("Content-Encoding") == "gzip" {
-		b, err := GetGzipReader(r.Body)
+		b, err := compression.GetGzipReader(r.Body)
 		if err != nil {
 			h.httpError(w, err.Error(), http.StatusBadRequest)
 			error := errno.NewError(errno.HttpBadRequest)
@@ -1326,7 +1330,7 @@ func (h *Handler) serveWrite(w http.ResponseWriter, r *http.Request, user meta2.
 			atomic.AddInt64(&statistics.HandlerStat.Write400ErrRequests, 1)
 			return
 		}
-		defer PutGzipReader(b)
+		defer compression.PutGzipReader(b)
 		body = b
 	}
 
